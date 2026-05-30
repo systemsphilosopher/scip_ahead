@@ -2,26 +2,14 @@ import os
 import sqlite3
 import shutil
 import tempfile
-import logging
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from scip_ahead.scip_ahead_logger import logger
 from scip_ahead.scip_ingestor import SCIPIngestor
 from scip_ahead.scip_indexer import SCIPIndexer
 from scip_ahead.scip_searcher import SCIPSearcher
-
-# Diagnostic log to a fixed absolute path so it is findable regardless of the
-# server's working directory (the MCP host may launch us from anywhere).
-LOG_PATH = os.path.join(tempfile.gettempdir(), "scip_ahead.log")
-logger = logging.getLogger("scip_ahead")
-if not logger.handlers:
-    logger.setLevel(logging.DEBUG)
-    _handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
-    _handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    )
-    logger.addHandler(_handler)
 
 
 class SCIPper:
@@ -44,8 +32,13 @@ class SCIPper:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='repositories'"
             ).fetchone()
             if already_initialized is None:
+                logger.info("database empty — applying schema from %s to %s",
+                            schema_path, os.path.abspath(self.DB_PATH))
                 with open(schema_path, "r", encoding="utf-8") as f:
                     conn.executescript(f.read())
+            else:
+                logger.debug("database already initialized at %s",
+                             os.path.abspath(self.DB_PATH))
         finally:
             conn.close()
 
@@ -120,13 +113,15 @@ class SCIPper:
         return "snapshot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     def get_schema_context(self) -> str:
-        """Opens schema.md from the project root and returns its content as a string."""        
+        """Opens schema.md from the project root and returns its content as a string."""
         root_dir = os.path.dirname(os.path.abspath(__file__))
         schema_path = os.path.join(root_dir, "schema.md")
-        
+
+        logger.info("get_schema_context() reading %s", schema_path)
         with open(schema_path, "r", encoding="utf-8") as f:
             return f.read()
 
-    def search(self, query : str):
-        searcher = SCIPSearcher();
+    def search(self, query: str):
+        logger.info("search() called")
+        searcher = SCIPSearcher()
         return searcher.query(query)

@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from scip_ahead.scip_ahead_logger import logger
+
 
 class SCIPIndexer:
     """
@@ -42,6 +44,7 @@ class SCIPIndexer:
             raise NotADirectoryError(f"Repo root is not a directory: {root}")
 
         suffixes = self.PROJECT_SUFFIXES[language]
+        logger.info("discovering %s projects (suffixes=%s) under %s", language, suffixes, root)
         projects: set[Path] = set()
         for dirpath, dirnames, filenames in os.walk(root):
             # Prune excluded directories in place so os.walk does not descend them.
@@ -50,7 +53,9 @@ class SCIPIndexer:
                 if filename.endswith(suffixes):
                     projects.add(Path(dirpath) / filename)
 
-        return sorted(projects)
+        result = sorted(projects)
+        logger.info("discovery found %d project file(s)", len(result))
+        return result
 
     def index_project(self, language: str, project_file: Path, output_path: Path) -> Path:
         """
@@ -77,6 +82,7 @@ class SCIPIndexer:
     def _index_dotnet_project(self, project_file: Path, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        logger.info("running scip-dotnet for %s -> %s", project_file, output_path)
         try:
             result = subprocess.run(
                 [
@@ -109,4 +115,5 @@ class SCIPIndexer:
         if not output_path.exists():
             raise FileNotFoundError(f"index.scip not generated at {output_path}")
 
+        logger.info("scip-dotnet succeeded for %s", project_file)
         return output_path

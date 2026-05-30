@@ -3,6 +3,8 @@ import sqlite3
 import sqlparse
 from sqlparse.tokens import DML
 
+from scip_ahead.scip_ahead_logger import logger
+
 
 class SCIPSearcher:
 
@@ -50,12 +52,15 @@ class SCIPSearcher:
             raise ValueError("No SQL provided")
 
         self.__is_readonly_query(sql)
+        logger.info("query validated, executing against %s", self.DB_PATH)
 
         conn = sqlite3.connect(f"file:{self.DB_PATH}?mode=ro", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(sql)
-            return json.dumps([dict(row) for row in cur.fetchall()], indent=2)
+            rows = [dict(row) for row in cur.fetchall()]
+            logger.info("query returned %d row(s)", len(rows))
+            return json.dumps(rows, indent=2)
         finally:
             conn.close()

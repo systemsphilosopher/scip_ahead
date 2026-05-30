@@ -1,5 +1,7 @@
 import sqlite3
 from scip_ahead.scip_pb2 import Index
+from scip_ahead.scip_ahead_logger import logger
+
 
 class SCIPIngestor:
 
@@ -24,19 +26,24 @@ class SCIPIngestor:
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             repository_id = self.get_or_create_repo(conn, repo_name)
+            logger.info("ingest_scip: repo=%r id=%d, %d index file(s)",
+                        repo_name, repository_id, len(scip_paths))
 
             snapshot_id = self.check_or_create_snapshot(conn, repository_id, commit_sha)
             if snapshot_id is None:
+                logger.warning("ingest_scip: snapshot %r already exists — skipping", commit_sha)
                 return [
                     f"Snapshot for {repo_name!r} @ {commit_sha!r} already exists — "
                     f"nothing ingested. Delete the database or index a new commit to re-ingest."
                 ]
+            logger.info("ingest_scip: using snapshot id=%d", snapshot_id)
 
             for scip_path in scip_paths:
                 try:
                     index = Index()
                     with open(scip_path, "rb") as f:
                         index.ParseFromString(f.read())
+                    logger.info("ingesting %s: %d document(s)", scip_path, len(index.documents))
 
                     conn.execute("BEGIN")
                     doc_ids = self.ingest_docs(conn, index, repository_id, snapshot_id)
@@ -50,12 +57,16 @@ class SCIPIngestor:
                         conn, index, snapshot_id, scip_symbol_to_id
                     )
                     conn.commit()
+                    logger.info("ingested %s: %d doc(s), %d symbol(s)",
+                                scip_path, len(doc_ids), len(scip_symbol_to_id))
                 except Exception as e:
                     conn.rollback()
+                    logger.exception("ingest failed for %s", scip_path)
                     errors.append(f"[ingest] {scip_path}: {e}")
         finally:
             conn.close()
 
+        logger.info("ingest_scip complete: %d error(s)", len(errors))
         return errors
 
     def ingest_docs(
