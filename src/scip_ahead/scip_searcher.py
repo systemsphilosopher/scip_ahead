@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sqlparse
 from sqlparse.tokens import DML
@@ -39,7 +40,7 @@ class SCIPSearcher:
             if token.normalized.upper() in self.FORBIDDEN_KEYWORDS:
                 raise ValueError(f"Forbidden keyword detected: {token.normalized}")
 
-    def query(self, sql: str) -> list[dict]:
+    def query(self, sql: str) -> str:
         """
         Executes a read-only SQL query and returns results as a list of dicts.
         Raises ValueError if the query is not a safe SELECT statement.
@@ -55,6 +56,6 @@ class SCIPSearcher:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(sql)
-            return [dict(row) for row in cur.fetchall()]
+            return json.dumps([dict(row) for row in cur.fetchall()], indent=2)
         finally:
             conn.close()

@@ -13,8 +13,7 @@ def index(language: str, path: str) -> str:
         language: The programming language of the codebase (e.g. 'dotnet', 'python')
         path: The absolute path to the root of the codebase to index
     """
-    scipper.index(language, path)
-    return f"Successfully indexed and ingested {path}"
+    return scipper.index(language, path)
 
 
 @mcp.tool()

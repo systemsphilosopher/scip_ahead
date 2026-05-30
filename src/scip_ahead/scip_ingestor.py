@@ -3,25 +3,60 @@ from scip_ahead.scip_pb2 import Index
 
 class SCIPIngestor:
 
-    def ingest_scip(self, db_path: str, scip_path: str, commit_sha: str) -> None:
+    def ingest_scip(
+        self,
+        db_path: str,
+        scip_paths: list[str],
+        repo_name: str,
+        commit_sha: str,
+    ) -> list[str]:
+        """
+        Ingest one or more SCIP index files into a single repository + snapshot.
+
+        Each index file is ingested in its own transaction so that a failure in
+        one project does not abort the others. Returns a list of human-readable
+        error messages (empty if everything succeeded). Cross-project references
+        resolve automatically because symbols are merged by their global SCIP
+        symbol string within the shared snapshot (UNIQUE(scip_symbol, snapshot_id)).
+        """
+        errors: list[str] = []
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            repository_id = self.get_or_create_repo(conn, repo_name)
 
-        index = Index()
-        with open(scip_path, "rb") as f:
-            index.ParseFromString(f.read())
+            snapshot_id = self.check_or_create_snapshot(conn, repository_id, commit_sha)
+            if snapshot_id is None:
+                return [
+                    f"Snapshot for {repo_name!r} @ {commit_sha!r} already exists — "
+                    f"nothing ingested. Delete the database or index a new commit to re-ingest."
+                ]
 
-        repository_id = self.upsert_repo(conn, index)
+            for scip_path in scip_paths:
+                try:
+                    index = Index()
+                    with open(scip_path, "rb") as f:
+                        index.ParseFromString(f.read())
 
-        snapshot_id = self.check_or_create_snapshot(conn, repository_id, commit_sha)
-        if snapshot_id is None:
-            return
+                    conn.execute("BEGIN")
+                    doc_ids = self.ingest_docs(conn, index, repository_id, snapshot_id)
+                    scip_symbol_to_id = self.ingest_symbols(
+                        conn, index, repository_id, snapshot_id
+                    )
+                    self.ingest_occurrences(
+                        conn, index, repository_id, snapshot_id, doc_ids, scip_symbol_to_id
+                    )
+                    self.ingest_relationships(
+                        conn, index, snapshot_id, scip_symbol_to_id
+                    )
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    errors.append(f"[ingest] {scip_path}: {e}")
+        finally:
+            conn.close()
 
-        conn.execute("BEGIN")
-        # transaction is now open — steps 4–9 continue here
-        doc_ids = self.ingest_docs(conn, index, repository_id, snapshot_id)
-        scip_symbol_to_id = self.ingest_symbols(conn, index, repository_id, snapshot_id)
-        conn.commit()
+        return errors
 
     def ingest_docs(
         self,
@@ -48,10 +83,13 @@ class SCIPIngestor:
 
         return path_to_doc_id
 
-    def upsert_repo(self, conn: sqlite3.Connection, index: Index) -> int:
-        project_root = index.metadata.project_root
-        repo_name = project_root.rstrip("/").split("/")[-1]
+    def get_or_create_repo(self, conn: sqlite3.Connection, repo_name: str) -> int:
+        """Resolve the repository row for the whole repo root, creating it if needed.
 
+        The repository represents the indexed root directory (which may contain
+        many projects), so identity is the caller-supplied repo name rather than
+        any single index's project_root.
+        """
         row = conn.execute(
             "SELECT id FROM repositories WHERE name = ?", (repo_name,)
         ).fetchone()
@@ -84,6 +122,19 @@ class SCIPIngestor:
         conn.commit()
         return cursor.lastrowid
 
+    @staticmethod
+    def _symbol_name_fallback(scip_symbol: str) -> str:
+        """
+        Extract a readable short name from a SCIP symbol string when display_name
+        is absent. SCIP symbols look like:
+            scip-dotnet nuget . . ClassLibrary1/Class1Child#class1_child_function1().
+        The descriptor after the last '#' or '.' run is the meaningful part.
+        Strips trailing punctuation characters that SCIP uses as descriptor suffixes
+        (parens, dots, slashes, hashes) so we get 'class1_child_function1' not ''.
+        """
+        name = scip_symbol.rstrip("()./#").split("/")[-1].split("#")[-1]
+        return name or scip_symbol
+
     def ingest_symbols(
         self,
         conn: sqlite3.Connection,
@@ -101,7 +152,7 @@ class SCIPIngestor:
             for sym_info in doc.symbols:
                 rows.append((
                     sym_info.symbol,
-                    sym_info.display_name or sym_info.symbol.split(".")[-1],
+                    sym_info.display_name or self._symbol_name_fallback(sym_info.symbol),
                     sym_info.kind or None,
                     lang,
                     sym_info.signature_documentation.text if sym_info.HasField("signature_documentation") else None,
@@ -114,7 +165,7 @@ class SCIPIngestor:
         for sym_info in index.external_symbols:
             rows.append((
                 sym_info.symbol,
-                sym_info.display_name or sym_info.symbol.split(".")[-1],
+                sym_info.display_name or self._symbol_name_fallback(sym_info.symbol),
                 sym_info.kind or None,
                 None,  # no language on external symbols
                 sym_info.signature_documentation.text if sym_info.HasField("signature_documentation") else None,
@@ -152,7 +203,125 @@ class SCIPIngestor:
             scip_symbol_to_id[scip_symbol] = sym_id
 
         return scip_symbol_to_id
-    
+
+    @staticmethod
+    def _decode_range(values) -> tuple[int, int, int, int] | None:
+        """
+        Decode a SCIP range into (start_line, end_line, start_character, end_character).
+
+        SCIP ranges are variable length (see scip.proto, Range encoding):
+          - 4 elements: [start_line, start_char, end_line, end_char]  (spans lines)
+          - 3 elements: [start_line, start_char, end_char]            (single line;
+                          end_line is implicitly equal to start_line)
+        Returns None for an empty/unrecognized range (e.g. an absent enclosing_range).
+        """
+        vals = list(values)
+        if len(vals) == 4:
+            return vals[0], vals[2], vals[1], vals[3]
+        if len(vals) == 3:
+            return vals[0], vals[0], vals[1], vals[2]
+        return None
+
+    def ingest_occurrences(
+        self,
+        conn: sqlite3.Connection,
+        index: Index,
+        repository_id: int,
+        snapshot_id: int,
+        doc_ids: dict[str, int],
+        scip_symbol_to_id: dict[str, int],
+    ) -> None:
+        from scip_ahead.scip_pb2 import SyntaxKind
+
+        DEFINITION_ROLE = 0x1  # SymbolRole.Definition (scip.proto)
+
+        # An occurrence's symbol often has no SymbolInformation entry — most
+        # references point at namespaces or external/framework symbols
+        # (e.g. System/Console#WriteLine). Synthesize minimal symbol rows for
+        # those so every occurrence can satisfy the NOT NULL symbol_id FK.
+        missing: set[str] = set()
+        for doc in index.documents:
+            for occ in doc.occurrences:
+                if occ.symbol and occ.symbol not in scip_symbol_to_id:
+                    missing.add(occ.symbol)
+
+        if missing:
+            conn.executemany(
+                """
+                INSERT INTO symbols (scip_symbol, symbol_name, repository_id, snapshot_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (scip_symbol, snapshot_id) DO NOTHING
+                """,
+                [(s, s, repository_id, snapshot_id) for s in missing],
+            )
+            placeholders = ",".join("?" * len(missing))
+            cursor = conn.execute(
+                f"""
+                SELECT scip_symbol, id FROM symbols
+                WHERE scip_symbol IN ({placeholders}) AND snapshot_id = ?
+                """,
+                (*missing, snapshot_id),
+            )
+            for scip_symbol, sym_id in cursor.fetchall():
+                scip_symbol_to_id[scip_symbol] = sym_id
+
+        rows: list[tuple] = []
+        for doc in index.documents:
+            document_id = doc_ids.get(doc.relative_path)
+            if document_id is None:
+                continue
+
+            for occ in doc.occurrences:
+                symbol_id = scip_symbol_to_id.get(occ.symbol)
+                if symbol_id is None:
+                    continue
+
+                rng = self._decode_range(occ.range)
+                if rng is None:
+                    continue
+                start_line, end_line, start_char, end_char = rng
+
+                enc = self._decode_range(occ.enclosing_range)
+                enc_start_line, enc_end_line, enc_start_char, enc_end_char = (
+                    enc if enc is not None else (None, None, None, None)
+                )
+
+                syntax_kind = (
+                    SyntaxKind.Name(occ.syntax_kind)
+                    if occ.syntax_kind != SyntaxKind.UnspecifiedSyntaxKind
+                    else None
+                )
+                is_definition = 1 if (occ.symbol_roles & DEFINITION_ROLE) else 0
+
+                rows.append((
+                    symbol_id,
+                    document_id,
+                    start_line,
+                    end_line,
+                    start_char,
+                    end_char,
+                    enc_start_line,
+                    enc_end_line,
+                    enc_start_char,
+                    enc_end_char,
+                    syntax_kind,
+                    is_definition,
+                ))
+
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO occurrences
+                    (symbol_id, document_id, start_line, end_line,
+                     start_character, end_character,
+                     enclosing_start_line, enclosing_end_line,
+                     enclosing_start_character, enclosing_end_character,
+                     syntax_kind, is_definition)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
     def ingest_relationships(
         self,
         conn: sqlite3.Connection,
