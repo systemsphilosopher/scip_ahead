@@ -1,3 +1,7 @@
+# SCIP Ahead
+scip_ahead_log.txt
+scip_ahead.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

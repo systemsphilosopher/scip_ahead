@@ -21,6 +21,8 @@ class SCIPIngestor:
         # transaction is now open — steps 4–9 continue here
         doc_ids = self.ingest_docs(conn, index, repository_id, snapshot_id)
         scip_symbol_to_id = self.ingest_symbols(conn, index, repository_id, snapshot_id)
+        self.ingest_relationships(conn, index, snapshot_id)
+        
         conn.commit()
 
     def ingest_docs(

@@ -1,6 +1,9 @@
+import json
 import sqlite3
 import sqlparse
 from sqlparse.tokens import DML
+
+from scip_ahead.scip_ahead_logger import logger
 
 
 class SCIPSearcher:
@@ -39,7 +42,7 @@ class SCIPSearcher:
             if token.normalized.upper() in self.FORBIDDEN_KEYWORDS:
                 raise ValueError(f"Forbidden keyword detected: {token.normalized}")
 
-    def query(self, sql: str) -> list[dict]:
+    def query(self, sql: str) -> str:
         """
         Executes a read-only SQL query and returns results as a list of dicts.
         Raises ValueError if the query is not a safe SELECT statement.
@@ -49,12 +52,15 @@ class SCIPSearcher:
             raise ValueError("No SQL provided")
 
         self.__is_readonly_query(sql)
+        logger.info("query validated, executing against %s", self.DB_PATH)
 
         conn = sqlite3.connect(f"file:{self.DB_PATH}?mode=ro", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(sql)
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+            logger.info("query returned %d row(s)", len(rows))
+            return json.dumps(rows, indent=2)
         finally:
             conn.close()

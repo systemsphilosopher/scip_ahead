@@ -56,25 +56,40 @@ CREATE TABLE IF NOT EXISTS occurrences (
     end_line        INTEGER NOT NULL,
     start_character INTEGER NOT NULL,
     end_character   INTEGER NOT NULL,
+    -- (optional) Half-open range of the nearest enclosing AST node, same encoding
+    -- as the range columns above. NULL when the indexer does not emit it
+    -- (e.g. scip-dotnet). See Occurrence.enclosing_range in scip.proto.
+    enclosing_start_line      INTEGER,
+    enclosing_end_line        INTEGER,
+    enclosing_start_character INTEGER,
+    enclosing_end_character   INTEGER,
     syntax_kind     TEXT,
     is_definition   INTEGER DEFAULT 0,  -- 0 = false, 1 = true
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 6️⃣ Relationships
+-- Boolean flags mirror SCIP's Relationship message (scip.proto): a single edge
+-- can be any combination of reference / implementation / type-definition / definition.
 CREATE TABLE IF NOT EXISTS relationships (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     source_symbol_id    INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     target_symbol_id    INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-    relationship_type   TEXT NOT NULL,
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+    is_reference        INTEGER DEFAULT 0,  -- 0 = false, 1 = true
+    is_implementation   INTEGER DEFAULT 0,
+    is_type_definition  INTEGER DEFAULT 0,
+    is_definition       INTEGER DEFAULT 0,
+    snapshot_id         INTEGER NOT NULL REFERENCES index_snapshots(id) ON DELETE CASCADE,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_symbol_id, target_symbol_id, snapshot_id)
 );
 
 -- 7️⃣ Indexing Errors (for debugging)
 CREATE TABLE IF NOT EXISTS indexing_errors (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id   INTEGER REFERENCES repositories(id),
+    snapshot_id     INTEGER REFERENCES index_snapshots(id) ON DELETE CASCADE,
     document_path   TEXT,
+    scip_symbol     TEXT,
     error_message   TEXT,
     occurred_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -99,7 +114,7 @@ CREATE INDEX IF NOT EXISTS occurrences_definition_idx ON occurrences(is_definiti
 -- Relationships
 CREATE INDEX IF NOT EXISTS relationships_source_idx ON relationships(source_symbol_id);
 CREATE INDEX IF NOT EXISTS relationships_target_idx ON relationships(target_symbol_id);
-CREATE INDEX IF NOT EXISTS relationships_type_idx ON relationships(relationship_type);
+CREATE INDEX IF NOT EXISTS relationships_snapshot_idx ON relationships(snapshot_id);
 
 -- Index Snapshots
 CREATE INDEX IF NOT EXISTS index_snapshots_repo_idx ON index_snapshots(repository_id);
