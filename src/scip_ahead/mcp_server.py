@@ -1,5 +1,5 @@
 from fastmcp import FastMCP
-from Classes.scipper import SCIPper
+from scip_ahead.scipper import SCIPper
 
 mcp = FastMCP("SCIPAhead")
 scipper = SCIPper()
@@ -33,5 +33,9 @@ def search(query: str) -> str:
     return scipper.search(query)
 
 
-if __name__ == "__main__":
+def main() -> None:
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,5 @@
 import sqlite3
-from Classes.scip_pb2 import Index
+from scip_ahead.scip_pb2 import Index
 
 class SCIPIngestor:
 

@@ -1,10 +1,10 @@
 import subprocess
 import os
 from pathlib import Path
-from Classes.scip_ingestor import SCIPIngestor
+from scip_ahead.scip_ingestor import SCIPIngestor
 import struct
-from Classes.scip_indexer import SCIPIndexer
-from Classes.scip_searcher import SCIPSearcher
+from scip_ahead.scip_indexer import SCIPIndexer
+from scip_ahead.scip_searcher import SCIPSearcher
 
 class SCIPper:
 
