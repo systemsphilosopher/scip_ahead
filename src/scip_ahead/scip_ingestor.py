@@ -112,7 +112,6 @@ class SCIPIngestor:
         ).fetchone()
 
         if existing:
-            print(f"Snapshot already exists for repository_id={repository_id}, commit_sha={commit_sha!r} — skipping ingestion.")
             return None
 
         cursor = conn.execute(

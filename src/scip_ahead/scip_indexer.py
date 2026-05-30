@@ -109,5 +109,4 @@ class SCIPIndexer:
         if not output_path.exists():
             raise FileNotFoundError(f"index.scip not generated at {output_path}")
 
-        print(f"Index generated: {output_path}")
         return output_path

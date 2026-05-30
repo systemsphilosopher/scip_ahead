@@ -1,13 +1,28 @@
-import subprocess
 import os
 import sqlite3
 import shutil
 import tempfile
+import logging
+import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from scip_ahead.scip_ingestor import SCIPIngestor
 from scip_ahead.scip_indexer import SCIPIndexer
 from scip_ahead.scip_searcher import SCIPSearcher
+
+# Diagnostic log to a fixed absolute path so it is findable regardless of the
+# server's working directory (the MCP host may launch us from anywhere).
+LOG_PATH = os.path.join(tempfile.gettempdir(), "scip_ahead.log")
+logger = logging.getLogger("scip_ahead")
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG)
+    _handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    logger.addHandler(_handler)
+
 
 class SCIPper:
 
@@ -31,7 +46,6 @@ class SCIPper:
             if already_initialized is None:
                 with open(schema_path, "r", encoding="utf-8") as f:
                     conn.executescript(f.read())
-                print(f"Initialized database schema at {self.DB_PATH}")
         finally:
             conn.close()
 
@@ -43,59 +57,66 @@ class SCIPper:
         individual projects are collected and reported at the end rather than
         aborting the whole run.
         """
-        repo_root = Path(str(path).strip().strip('"').strip("'"))
-        indexer = SCIPIndexer()
-
-        print("Discovering project files...")
-        projects = indexer.discover_projects(language, str(repo_root))
-        if not projects:
-            return f"No {language} project files found under {repo_root}"
-
-        errors: list[str] = []
-        index_paths: list[str] = []
-
-        work_dir = Path(tempfile.mkdtemp(prefix="scip_ahead_"))
-        try:
-            for i, project in enumerate(projects):
-                output_path = work_dir / f"{i}_{project.stem}.scip"
-                print(f"Indexing {project} ...")
-                try:
-                    indexer.index_project(language, project, output_path)
-                    index_paths.append(str(output_path))
-                except Exception as e:
-                    errors.append(f"[index] {project}: {e}")
-
-            print("Ingesting...")
-            repo_name = repo_root.name or str(repo_root)
-            commit_sha = self._resolve_commit_sha(repo_root)
-            errors.extend(
-                SCIPIngestor().ingest_scip(
-                    self.DB_PATH, index_paths, repo_name, commit_sha
-                )
-            )
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-
-        summary = (
-            f"Indexed {len(index_paths)}/{len(projects)} project(s) under {repo_root}."
+        t0 = time.monotonic()
+        logger.info(
+            "index() called: language=%r path=%r cwd=%r db=%r",
+            language, path, os.getcwd(), os.path.abspath(self.DB_PATH),
         )
-        if errors:
-            return summary + "\n\nErrors:\n" + "\n".join(f"- {e}" for e in errors)
-        return summary + " No errors."
+        try:
+            repo_root = Path(str(path).strip().strip('"').strip("'"))
+            indexer = SCIPIndexer()
+
+            projects = indexer.discover_projects(language, str(repo_root))
+            logger.info("discovered %d project(s): %s", len(projects), [str(p) for p in projects])
+            if not projects:
+                return f"No {language} project files found under {repo_root}"
+
+            errors: list[str] = []
+            index_paths: list[str] = []
+
+            work_dir = Path(tempfile.mkdtemp(prefix="scip_ahead_"))
+            try:
+                for i, project in enumerate(projects):
+                    output_path = work_dir / f"{i}_{project.stem}.scip"
+                    p0 = time.monotonic()
+                    logger.info("indexing [%d/%d] %s", i + 1, len(projects), project)
+                    try:
+                        indexer.index_project(language, project, output_path)
+                        index_paths.append(str(output_path))
+                        logger.info("  done in %.1fs", time.monotonic() - p0)
+                    except Exception as e:
+                        logger.exception("  failed after %.1fs", time.monotonic() - p0)
+                        errors.append(f"[index] {project}: {e}")
+
+                repo_name = repo_root.name or str(repo_root)
+                commit_sha = self._resolve_commit_sha(repo_root)
+                logger.info("ingesting %d index file(s) as repo=%r commit=%r",
+                            len(index_paths), repo_name, commit_sha)
+                errors.extend(
+                    SCIPIngestor().ingest_scip(
+                        self.DB_PATH, index_paths, repo_name, commit_sha
+                    )
+                )
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+            summary = (
+                f"Indexed {len(index_paths)}/{len(projects)} project(s) under {repo_root}."
+            )
+            if errors:
+                summary += "\n\nErrors:\n" + "\n".join(f"- {e}" for e in errors)
+            else:
+                summary += " No errors."
+            logger.info("index() returning after %.1fs: %s", time.monotonic() - t0, summary)
+            return summary
+        except Exception:
+            logger.error("index() raised after %.1fs:\n%s",
+                         time.monotonic() - t0, traceback.format_exc())
+            raise
 
     def _resolve_commit_sha(self, repo_root: Path) -> str:
-        """Use the repo's current git commit as the snapshot key when available;
-        otherwise fall back to a timestamp so each run gets a fresh snapshot."""
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
+        """Snapshot key for this indexing run. A timestamp gives each run its own
+        snapshot."""
         return "snapshot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     def get_schema_context(self) -> str:
